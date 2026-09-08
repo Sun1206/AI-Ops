@@ -53,3 +53,4 @@ backend/run/
 backend/runtime/
 frontend/run/
 tmp_deploy/
+.worktrees/
