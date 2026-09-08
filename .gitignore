@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+*.egg
+.env
+db.sqlite3
+*.sqlite3
+*.sqlite3.*
+*.bak
+backend/config.json
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vite
+*.local
+
+# Local runtime logs
+*.log
+*.out.log
+*.err.log
+backend/*.log
+backend/*.out.log
+backend/*.err.log
+frontend/*.log
+frontend/*.out.log
+frontend/*.err.log
+backend/*.txt
+
+# Local verification artifacts
+frontend/cmdb-cost-check*.png
+frontend/cmdb-cost-check*.json
+frontend/screenshots/
+docs/screenshots/*-smoke.png
+
+# Local dev runtime
+.codex/
+.runlogs/
+backend/run/
+backend/runtime/
+frontend/run/
+tmp_deploy/
