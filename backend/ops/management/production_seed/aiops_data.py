@@ -30,13 +30,27 @@ TOPICS = [
     ('Kubernetes 节点磁盘压力处理', 'k8s-node', 'prod'),
     ('网关错误率异常分析', 'gateway', 'staging'),
     ('Redis 热点 Key 容量评估', 'redis-cluster', 'prod'),
+    ('订单数据库主从延迟排查', 'order-db', 'prod'),
+    ('支付网关证书到期风险评估', 'payment-gateway', 'prod'),
+    ('搜索服务内存增长趋势分析', 'search-service', 'prod'),
+    ('消息队列消费延迟恢复', 'kafka-consumer', 'prod'),
+    ('对象存储访问错误定位', 'storage-proxy', 'prod'),
+    ('风控规则发布后错误率分析', 'risk-engine', 'prod'),
+    ('预发布环境镜像拉取失败', 'image-registry', 'staging'),
+    ('核心 DNS 解析抖动排查', 'core-dns', 'prod'),
 ]
 
 TOOL_NAMES = ['query_alerts', 'search_logs', 'get_host_detail', 'query_metrics']
 MODEL_PURPOSES = ['chat_planning', 'answer_formatting', 'parameter_extraction']
-ACTION_STATUSES = ['pending', 'confirmed', 'executed', 'canceled', 'failed', 'executed', 'confirmed', 'pending']
-TASK_STATUSES = ['completed', 'running', 'failed', 'canceled', 'completed', 'queued', 'completed', 'failed']
-HISTORY_DAYS = [1, 2, 3, 5, 7, 14, 30, 75]
+ACTION_STATUSES = [
+    'pending', 'confirmed', 'executed', 'canceled',
+    'failed', 'executed', 'confirmed', 'pending',
+] * 2
+TASK_STATUSES = [
+    'completed', 'running', 'failed', 'canceled',
+    'completed', 'queued', 'completed', 'failed',
+] * 2
+HISTORY_DAYS = [0, 1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 15, 18, 21, 25, 29]
 
 RUNBOOK_SPECS = [
     ('order-latency-response', '订单接口延迟应急处置', 'order-service'),
@@ -147,10 +161,19 @@ def _seed_sessions_and_audit(stats, base, provider, now):
                     'service': service,
                     'environment': environment,
                     'source': 'operations-console',
+                    'seed_namespace': 'production-sessions',
                 },
             },
             stats=stats,
         )
+        session_context = dict(session.context or {})
+        if (
+            session_context.get('seed_key') == f'aiops-session-{session_index + 1:02d}'
+            and session_context.get('seed_namespace') != 'production-sessions'
+        ):
+            session_context['seed_namespace'] = 'production-sessions'
+            session.context = session_context
+            session.save(update_fields=['context'])
         backdate(
             session,
             created_at=event_time,
@@ -199,6 +222,61 @@ def _seed_sessions_and_audit(stats, base, provider, now):
             assistant,
             created_at=event_time + timedelta(minutes=20),
         )
+
+        conversation_turns = [
+            (
+                'followup-user', 'user', 'text',
+                '请补充最近变更、异常主机和关键日志证据。',
+                [],
+            ),
+            (
+                'followup-assistant', 'assistant', 'analysis',
+                f'最近变更与异常窗口重合，{service} 的两台实例出现资源抖动，'
+                '日志中已定位到同一批请求链路，建议先隔离异常实例并观察核心指标。',
+                TOOL_NAMES[:3],
+            ),
+            (
+                'action-user', 'user', 'text',
+                '给出可以执行的低风险步骤，并说明验证标准。',
+                [],
+            ),
+            (
+                'action-assistant', 'assistant', 'action',
+                '已生成分阶段处置方案：保存现场、隔离异常实例、恢复流量，'
+                '以错误率、P99 延迟和队列积压恢复到基线作为验证标准。',
+                ['create_pending_action'],
+            ),
+        ]
+        for turn_index, (suffix, role, message_type, content, tool_calls) in enumerate(
+            conversation_turns,
+            start=1,
+        ):
+            message = get_or_create_json_key(
+                AIOpsChatMessage,
+                json_field='metadata',
+                seed_key=f'aiops-message-{session_index + 1:02d}-{suffix}',
+                defaults={
+                    'session': session,
+                    'role': role,
+                    'message_type': message_type,
+                    'content': content,
+                    'citations': (
+                        [{'type': 'alert', 'id': base['alert'].pk}]
+                        if role == 'assistant' else []
+                    ),
+                    'tool_calls': tool_calls,
+                    'metadata': {
+                        'service': service,
+                        'environment': environment,
+                        'source': 'operations-console',
+                    },
+                },
+                stats=stats,
+            )
+            backdate(
+                message,
+                created_at=event_time + timedelta(minutes=20 + turn_index * 5),
+            )
 
         for tool_index, tool_name in enumerate(TOOL_NAMES):
             failed = (session_index + tool_index) % 9 == 0

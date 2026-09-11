@@ -1088,6 +1088,28 @@ class ObservabilityViewsTests(TestCase):
         self.assertEqual(payload['modules']['grafana']['dashboards'][0]['key'], 'custom-trace')
         self.assertEqual(payload['modules']['grafana']['dashboards'][0]['url'], 'http://grafana.example.com/d/custom-trace')
 
+    def test_observability_overview_accepts_dashboard_without_panel_count(self):
+        GrafanaSetting.objects.create(
+            name='default',
+            enabled=False,
+            url='http://grafana.ops.internal:3000',
+            default_path='/d/service-overview',
+            dashboards=[
+                {
+                    'key': 'service-overview',
+                    'name': '服务总览',
+                    'path': '/d/service-overview',
+                    'folder_key': 'applications',
+                }
+            ],
+            updated_by='ops.reader',
+        )
+
+        response = self.client.get('/api/observability/overview/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['modules']['grafana']['panel_count'], 0)
+
     def test_grafana_config_endpoint_returns_defaults_when_not_persisted(self):
         response = self.client.get('/api/observability/grafana/config/')
 

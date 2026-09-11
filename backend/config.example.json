@@ -3,9 +3,9 @@
     "type": "mysql",
     "host": "127.0.0.1",
     "port": 3306,
-    "database_name": "sxdevops",
-    "user": "sxdevops",
-    "password": "change-me",
+    "database_name": "aidevops",
+    "user": "aidevops",
+    "password": "aidevops",
     "charset": "utf8mb4",
     "conn_max_age": 60,
     "options": {
@@ -15,7 +15,7 @@
   "cache": {
     "type": "redis",
     "redis_url": "redis://127.0.0.1:6379/0",
-    "key_prefix": "sxdevops",
+    "key_prefix": "aidevops",
     "default_timeout_seconds": 300,
     "ignore_redis_errors": true
   }

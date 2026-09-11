@@ -101,6 +101,10 @@ Expected: FAIL with `Unknown command: 'seed_production_data'`.
 
 - Create: `backend/ops/management/production_seed/__init__.py`
 - Create: `backend/ops/management/production_seed/common.py`
+- Create: `backend/ops/management/production_seed/task_resources.py`
+- Create: `backend/ops/management/production_seed/alerting.py`
+- Create: `backend/ops/management/production_seed/observability.py`
+- Create: `backend/ops/management/production_seed/aiops_data.py`
 - Create: `backend/ops/management/commands/seed_production_data.py`
 - Modify: `backend/ops/test_seed_production_data.py`
 
@@ -309,14 +313,28 @@ class Command(BaseCommand):
         ))
 ```
 
-At this checkpoint, create temporary modules exporting no-op functions with the exact signatures used above so the helper test can import the command while domain implementations are added:
+At this checkpoint, create the following minimal modules so the helper test can import the command while the next four tasks replace each function body:
 
 ```python
+# backend/ops/management/production_seed/task_resources.py
 def seed_task_resources(stats, base):
     return {}
-```
 
-Use the corresponding signatures for `seed_alerting`, `seed_observability`, and `seed_aiops`; return an empty dictionary from the first three and `None` from the last.
+
+# backend/ops/management/production_seed/alerting.py
+def seed_alerting(stats, base):
+    return {}
+
+
+# backend/ops/management/production_seed/observability.py
+def seed_observability(stats, base):
+    return {}
+
+
+# backend/ops/management/production_seed/aiops_data.py
+def seed_aiops(stats, base, task_context, alert_context, obs_context):
+    return None
+```
 
 - [ ] **Step 5: Run the helper test**
 
@@ -360,11 +378,11 @@ Run:
 docker compose exec -T sxdevops python manage.py test ops.test_seed_production_data.ProductionTaskResourceSeedTests -v 2
 ```
 
-Expected: FAIL because the no-op seeder creates zero resource groups.
+Expected: FAIL because the minimal resource seeder creates zero resource groups.
 
 - [ ] **Step 3: Implement deterministic resource creation**
 
-Replace the no-op function with logic using this exact matrix:
+Replace the minimal resource function with logic using this exact matrix:
 
 ```python
 from eventwall.models import EventEnvironment
@@ -702,7 +720,7 @@ class ProductionObservabilitySeedTests(TestCase):
         call_command('seed_production_data')
         self.assertEqual(MetricDataSource.objects.count(), 3)
         self.assertEqual(TracingDataSource.objects.count(), 2)
-        self.assertGreaterEqual(ObservabilityDataSourceLink.objects.count(), 2)
+        self.assertGreaterEqual(ObservabilityDataSourceLink.objects.count(), 4)
         self.assertTrue(GrafanaSetting.objects.filter(name='default').exists())
         self.assertFalse(MetricDataSource.objects.filter(is_enabled=True).exists())
         self.assertFalse(TracingDataSource.objects.filter(is_enabled=True).exists())
@@ -738,7 +756,7 @@ Implement the full seeder as follows:
 
 ```python
 from ops.models import (
-    GrafanaSetting, MetricDataSource, ObservabilityDataSourceLink,
+    GrafanaSetting, LogDataSource, MetricDataSource, ObservabilityDataSourceLink,
     TracingDataSource,
 )
 
@@ -746,6 +764,17 @@ from .common import update_or_create_first
 
 
 def seed_observability(stats, base):
+    staging_log = update_or_create_first(
+        LogDataSource,
+        {'name': '预发布日志中心'},
+        {
+            'provider': 'loki', 'description': '预发布应用与基础设施日志',
+            'config': {'base_url': 'http://loki-staging.ops.internal:3100'},
+            'is_enabled': False, 'is_default': False,
+        },
+        stats,
+    )
+    log_sources = [base['log_source'], staging_log]
     metrics = []
     for name, environment, cluster_name, tsdb_type, url, is_default in METRICS:
         metrics.append(update_or_create_first(
@@ -774,14 +803,15 @@ def seed_observability(stats, base):
         ))
 
     links = []
-    for index, tracing in enumerate(tracings):
-        link = update_or_create_first(
-            ObservabilityDataSourceLink,
-            {'log_datasource': base['log_source'], 'tracing_datasource': tracing},
-            {
-                'name': ('生产日志到 Tempo', '预发布日志到 Jaeger')[index],
+    for log_index, log_source in enumerate(log_sources):
+        for tracing_index, tracing in enumerate(tracings):
+            link = update_or_create_first(
+                ObservabilityDataSourceLink,
+                {'log_datasource': log_source, 'tracing_datasource': tracing},
+                {
+                'name': f'{log_source.name}到{tracing.name}',
                 'description': '日志、链路与看板上下文跳转',
-                'is_enabled': False, 'is_default': index == 0,
+                'is_enabled': False, 'is_default': log_index == 0 and tracing_index == 0,
                 'log_to_trace_enabled': True, 'trace_to_log_enabled': True,
                 'log_to_grafana_enabled': True, 'trace_to_grafana_enabled': True,
                 'grafana_to_log_enabled': True, 'grafana_to_trace_enabled': True,
@@ -799,10 +829,10 @@ def seed_observability(stats, base):
                 ],
                 'span_start_shift': '-5m', 'span_end_shift': '5m',
                 'window_minutes': 10,
-            },
-            stats,
-        )
-        links.append(link)
+                },
+                stats,
+            )
+            links.append(link)
 
     grafana = update_or_create_first(
         GrafanaSetting,
@@ -823,7 +853,7 @@ def seed_observability(stats, base):
         },
         stats,
     )
-    return {'metrics': metrics, 'tracings': tracings, 'links': links, 'grafana': grafana}
+    return {'log_sources': log_sources, 'metrics': metrics, 'tracings': tracings, 'links': links, 'grafana': grafana}
 ```
 
 - [ ] **Step 4: Run focused observability tests**
@@ -898,19 +928,282 @@ ACTION_STATUSES = ['pending', 'confirmed', 'executed', 'canceled', 'failed', 'ex
 TASK_STATUSES = ['completed', 'running', 'failed', 'canceled', 'completed', 'queued', 'completed', 'failed']
 ```
 
-Implement the following stable-key rules:
+Implement the exact stable-key and relationship rules below:
 
-- Knowledge environments are keyed by names `生产交易平台`, `预发布交易平台`, and `生产数据平台`; their JSON ID lists use the contexts returned by Tasks 3 and 5.
-- Sessions are found by `context.seed_key` values `aiops-session-01` through `aiops-session-08`; each gets one user message and one assistant message found by `metadata.seed_key`.
-- Each session gets four tool rows keyed through `request_payload.seed_key`, producing 32 rows. Status is failed only when `(session_index + tool_index) % 9 == 0`; latency is `140 + session_index * 35 + tool_index * 70`.
-- Each session gets three model rows keyed through `request_summary.seed_key`, producing 24 rows. Status is failed only when `(session_index + purpose_index) % 11 == 0`; prompt/completion tokens are `900 + session_index * 80` and `260 + purpose_index * 60`, total is their sum, and estimated USD cost is computed with `Decimal('0.000001')` precision.
-- Pending actions are found by `action_payload.seed_key`; use the eight statuses above and action type `execute_host_task`. Payloads describe read-only diagnostics or service restart plans but are never executed.
-- External task UUIDs use `uuid.uuid5(uuid.NAMESPACE_URL, f'ai-ops-production-task-{index}')`, making reruns stable.
-- Runbooks are keyed by slugs `order-latency-response`, `payment-backlog-recovery`, `member-release-rollback`, `mysql-pool-exhaustion`, `k8s-disk-pressure`, and `redis-hot-key-capacity`; each gets version 1 through `update_or_create(runbook=..., version=1)`.
-- Review knowledge uses slugs `review-01` through `review-08`, one per topic, and links to the matching session, external task when present, and cyclic Runbook.
-- Backdate all history using `[1, 2, 3, 5, 7, 14, 30, 75]` days. Keep event ordering within each session as user message, tool/model activity, assistant answer, then optional action.
+```python
+from datetime import timedelta
+from decimal import Decimal
+import uuid
 
-Return `None`; this is the final seeder.
+from django.utils import timezone
+
+from aiops.models import (
+    AIOpsChatMessage, AIOpsChatSession, AIOpsExternalTask,
+    AIOpsKnowledgeEnvironment, AIOpsModelInvocation, AIOpsModelProvider,
+    AIOpsPendingAction, AIOpsReviewKnowledge, AIOpsRunbook,
+    AIOpsRunbookVersion, AIOpsToolInvocation,
+)
+
+from .common import backdate, update_or_create_first, upsert_json_key
+
+
+HISTORY_DAYS = [1, 2, 3, 5, 7, 14, 30, 75]
+RUNBOOK_SPECS = [
+    ('order-latency-response', '订单接口延迟应急处置', 'order-service'),
+    ('payment-backlog-recovery', '支付任务积压恢复', 'payment-worker'),
+    ('member-release-rollback', '会员服务发布回滚', 'member-api'),
+    ('mysql-pool-exhaustion', '数据库连接池耗尽处置', 'mysql-primary'),
+    ('k8s-disk-pressure', 'Kubernetes 节点磁盘压力处置', 'k8s-node'),
+    ('redis-hot-key-capacity', 'Redis 热点 Key 容量治理', 'redis-cluster'),
+]
+
+
+def seed_aiops(stats, base, task_context, alert_context, obs_context):
+    now = timezone.now()
+    provider = AIOpsModelProvider.objects.order_by('pk').first()
+    if provider is None:
+        provider = update_or_create_first(
+            AIOpsModelProvider,
+            {'name': '平台分析模型'},
+            {
+                'provider_type': 'openai_compatible',
+                'base_url': 'http://model-gateway.ops.internal/v1',
+                'default_model': 'ops-reasoner-32b', 'backup_model': '',
+                'temperature': 0.2, 'max_tokens': 10000, 'timeout_seconds': 30,
+                'price_currency': 'USD', 'input_token_price_per_1m': Decimal('0.600000'),
+                'output_token_price_per_1m': Decimal('2.400000'),
+                'is_enabled': False, 'last_test_status': 'unknown',
+                'last_test_message': '',
+            },
+            stats,
+        )
+
+    environment_specs = [
+        ('生产交易平台', ['prod', 'production'], 'prod'),
+        ('预发布交易平台', ['staging', 'pre'], 'staging'),
+        ('生产数据平台', ['data-prod', 'prod-data'], 'prod'),
+    ]
+    env_groups = task_context['environments']
+    knowledge_envs = []
+    for index, (name, aliases, env_code) in enumerate(environment_specs):
+        knowledge_envs.append(update_or_create_first(
+            AIOpsKnowledgeEnvironment,
+            {'name': name},
+            {
+                'aliases': aliases, 'description': f'{name}资源与可观测上下文',
+                'event_environments': [env_code],
+                'grafana_folder_keys': ['applications', 'infrastructure'],
+                'metric_datasource_ids': [item.pk for item in obs_context['metrics'] if item.environment == env_code],
+                'log_datasource_ids': [item.pk for item in obs_context['log_sources']],
+                'tracing_datasource_ids': [item.pk for item in obs_context['tracings']],
+                'observability_link_ids': [item.pk for item in obs_context['links']],
+                'alert_environments': [env_code],
+                'k8s_cluster_ids': [base['cluster'].pk],
+                'k8s_namespaces': {str(base['cluster'].pk): ['production' if env_code == 'prod' else env_code]},
+                'docker_host_ids': [],
+                'task_resource_environment_ids': [env_groups[env_code].pk],
+                'association_snapshot': {'services': [topic[1] for topic in TOPICS if topic[2] == env_code]},
+                'child_node_snapshot': {'systems': list(task_context['systems'].keys())},
+                'snapshot_generated_at': now,
+                'is_default': index == 0, 'is_enabled': True,
+                'created_by': 'ops.reader', 'updated_by': 'ops.reader',
+            },
+            stats,
+        ))
+
+    sessions = []
+    assistant_messages = []
+    for session_index, (title, service, environment) in enumerate(TOPICS):
+        event_time = now - timedelta(days=HISTORY_DAYS[session_index], hours=session_index)
+        session = upsert_json_key(
+            AIOpsChatSession,
+            json_field='context',
+            seed_key=f'aiops-session-{session_index + 1:02d}',
+            defaults={
+                'user': base['user'], 'title': title,
+                'status': 'active' if session_index < 2 else 'archived',
+                'last_message_at': event_time + timedelta(minutes=20),
+                'context': {'service': service, 'environment': environment, 'source': 'operations-console'},
+            },
+            stats=stats,
+        )
+        backdate(AIOpsChatSession, session.pk, created_at=event_time, updated_at=event_time + timedelta(minutes=20))
+        user_message = upsert_json_key(
+            AIOpsChatMessage,
+            json_field='metadata',
+            seed_key=f'aiops-message-{session_index + 1:02d}-user',
+            defaults={
+                'session': session, 'role': 'user', 'message_type': 'text',
+                'content': f'请分析 {title}，给出影响范围、证据和处置建议。',
+                'citations': [], 'tool_calls': [],
+                'metadata': {'service': service, 'environment': environment},
+            },
+            stats=stats,
+        )
+        backdate(AIOpsChatMessage, user_message.pk, created_at=event_time)
+        assistant = upsert_json_key(
+            AIOpsChatMessage,
+            json_field='metadata',
+            seed_key=f'aiops-message-{session_index + 1:02d}-assistant',
+            defaults={
+                'session': session, 'role': 'assistant', 'message_type': 'analysis',
+                'content': f'已完成 {service} 的告警、日志、指标与变更关联分析，建议按 Runbook 分阶段处置并持续观察。',
+                'citations': [{'type': 'alert', 'id': base['alert'].pk}],
+                'tool_calls': TOOL_NAMES,
+                'metadata': {'service': service, 'environment': environment, 'confidence': 0.86},
+            },
+            stats=stats,
+        )
+        backdate(AIOpsChatMessage, assistant.pk, created_at=event_time + timedelta(minutes=20))
+
+        for tool_index, tool_name in enumerate(TOOL_NAMES):
+            failed = (session_index + tool_index) % 9 == 0
+            invocation = upsert_json_key(
+                AIOpsToolInvocation,
+                json_field='request_payload',
+                seed_key=f'aiops-tool-{session_index + 1:02d}-{tool_index + 1:02d}',
+                defaults={
+                    'session': session, 'message': assistant, 'tool_name': tool_name,
+                    'status': 'failed' if failed else 'success',
+                    'latency_ms': 140 + session_index * 35 + tool_index * 70,
+                    'request_payload': {'service': service, 'environment': environment},
+                    'response_summary': {'matched': 0 if failed else 6 + session_index, 'error': 'upstream timeout' if failed else ''},
+                },
+                stats=stats,
+            )
+            backdate(AIOpsToolInvocation, invocation.pk, created_at=event_time + timedelta(minutes=2 + tool_index * 2))
+
+        for purpose_index, purpose in enumerate(MODEL_PURPOSES):
+            failed = (session_index + purpose_index) % 11 == 0
+            prompt_tokens = 900 + session_index * 80
+            completion_tokens = 260 + purpose_index * 60
+            total_tokens = prompt_tokens + completion_tokens
+            invocation = upsert_json_key(
+                AIOpsModelInvocation,
+                json_field='request_summary',
+                seed_key=f'aiops-model-{session_index + 1:02d}-{purpose_index + 1:02d}',
+                defaults={
+                    'provider': provider, 'session': session, 'message': assistant,
+                    'username': base['user'].username, 'purpose': purpose,
+                    'requested_model': provider.default_model or 'ops-reasoner-32b',
+                    'resolved_model': provider.default_model or 'ops-reasoner-32b',
+                    'status': 'failed' if failed else 'success',
+                    'latency_ms': 820 + session_index * 95 + purpose_index * 180,
+                    'prompt_tokens': prompt_tokens, 'completion_tokens': completion_tokens,
+                    'total_tokens': total_tokens,
+                    'estimated_cost_usd': (Decimal(total_tokens) * Decimal('0.000002')).quantize(Decimal('0.000001')),
+                    'estimated_cost_currency': 'USD',
+                    'request_summary': {'service': service, 'environment': environment},
+                    'response_summary': {
+                        'finish_reason': 'error' if failed else 'stop',
+                        'error_type': ('rate_limited' if session_index % 2 == 0 else 'timeout') if failed else '',
+                    },
+                },
+                stats=stats,
+            )
+            backdate(AIOpsModelInvocation, invocation.pk, created_at=event_time + timedelta(minutes=10 + purpose_index * 2))
+
+        action = upsert_json_key(
+            AIOpsPendingAction,
+            json_field='action_payload',
+            seed_key=f'aiops-action-{session_index + 1:02d}',
+            defaults={
+                'session': session, 'message': assistant,
+                'action_type': 'execute_host_task',
+                'title': f'{service} 诊断与恢复任务',
+                'risk_level': ('low', 'medium', 'high', 'critical')[session_index % 4],
+                'status': ACTION_STATUSES[session_index],
+                'action_payload': {'operation': 'diagnose_service', 'service': service, 'environment': environment},
+                'result_payload': (
+                    {'summary': '任务步骤已记录'} if ACTION_STATUSES[session_index] == 'executed'
+                    else {'error_type': 'policy_blocked'} if ACTION_STATUSES[session_index] == 'failed'
+                    else {}
+                ),
+                'confirmed_by': 'SRE-王涛' if ACTION_STATUSES[session_index] in {'confirmed', 'executed'} else '',
+                'confirmed_at': event_time + timedelta(minutes=22) if ACTION_STATUSES[session_index] in {'confirmed', 'executed'} else None,
+            },
+            stats=stats,
+        )
+        backdate(AIOpsPendingAction, action.pk, created_at=event_time + timedelta(minutes=21), updated_at=event_time + timedelta(minutes=22))
+        sessions.append(session)
+        assistant_messages.append(assistant)
+
+    tasks = []
+    for index, (title, service, environment) in enumerate(TOPICS):
+        public_id = uuid.uuid5(uuid.NAMESPACE_URL, f'ai-ops-production-task-{index}')
+        task, created = AIOpsExternalTask.objects.update_or_create(
+            public_id=public_id,
+            defaults={
+                'source_agent': 'incident-analysis-agent', 'title': title,
+                'action_code': 'incident_analysis', 'agent_mode': 'orchestrated',
+                'status': TASK_STATUSES[index],
+                'input_payload': {'service': service, 'environment': environment},
+                'plan_steps': ['收集告警', '检索日志与指标', '分析变更', '生成处置建议'],
+                'orchestration_state': {'current_step': 4 if TASK_STATUSES[index] == 'completed' else 2},
+                'agent_results': [{'agent': 'observability', 'status': 'success'}],
+                'react_trace': [{'thought': '关联最近变更与异常窗口', 'action': 'query_context'}],
+                'result_payload': {'summary': '分析完成'} if TASK_STATUSES[index] == 'completed' else {},
+                'error_message': '上下文查询超时' if TASK_STATUSES[index] == 'failed' else '',
+                'created_by': base['user'],
+                'completed_at': now - timedelta(days=HISTORY_DAYS[index]) if TASK_STATUSES[index] == 'completed' else None,
+                'canceled_at': now - timedelta(days=HISTORY_DAYS[index]) if TASK_STATUSES[index] == 'canceled' else None,
+            },
+        )
+        stats.record(created)
+        backdate(AIOpsExternalTask, task.pk, created_at=now - timedelta(days=HISTORY_DAYS[index]), updated_at=now - timedelta(days=HISTORY_DAYS[index]))
+        tasks.append(task)
+
+    runbooks = []
+    for index, (slug, title, service) in enumerate(RUNBOOK_SPECS):
+        runbook, created = AIOpsRunbook.objects.update_or_create(
+            slug=slug,
+            defaults={
+                'title': title, 'environment': 'prod', 'service': service,
+                'status': 'published', 'version': 1,
+                'content': '1. 确认影响范围\n2. 保存现场证据\n3. 执行最小风险处置\n4. 验证核心指标\n5. 持续观察并复盘',
+                'evidence': [{'type': 'alert', 'id': base['alert'].pk}],
+                'tags': ['incident', 'operations', service],
+                'source_refs': [{'type': 'session', 'id': sessions[index % len(sessions)].pk}],
+                'source_task': tasks[index % len(tasks)],
+                'source_session': sessions[index % len(sessions)],
+                'created_by': 'SRE-王涛', 'updated_by': 'SRE-王涛',
+                'published_at': now - timedelta(days=HISTORY_DAYS[index]),
+                'archived_at': None,
+            },
+        )
+        stats.record(created)
+        _, version_created = AIOpsRunbookVersion.objects.update_or_create(
+            runbook=runbook,
+            version=1,
+            defaults={
+                'status': 'published', 'title': title, 'content': runbook.content,
+                'evidence': runbook.evidence, 'tags': runbook.tags,
+                'source_refs': runbook.source_refs,
+                'change_note': '建立标准处置流程', 'created_by': 'SRE-王涛',
+            },
+        )
+        stats.record(version_created)
+        runbooks.append(runbook)
+
+    for index, (title, service, environment) in enumerate(TOPICS):
+        review, created = AIOpsReviewKnowledge.objects.update_or_create(
+            slug=f'review-{index + 1:02d}',
+            defaults={
+                'title': f'{title}复盘',
+                'summary': f'{service} 异常由容量波动与下游依赖延迟共同触发，已完成处置并补充监控。',
+                'environment': environment, 'service': service,
+                'source_type': 'session',
+                'evidence': [{'type': 'alert', 'id': base['alert'].pk}],
+                'tags': ['postmortem', service, environment],
+                'source_refs': [{'type': 'external_task', 'id': str(tasks[index].public_id)}],
+                'source_session': sessions[index], 'source_task': tasks[index],
+                'source_runbook': runbooks[index % len(runbooks)],
+                'created_by': 'SRE-王涛', 'updated_by': 'SRE-王涛',
+            },
+        )
+        stats.record(created)
+        backdate(AIOpsReviewKnowledge, review.pk, created_at=now - timedelta(days=HISTORY_DAYS[index]), updated_at=now - timedelta(days=HISTORY_DAYS[index]))
+```
 
 - [ ] **Step 4: Run the focused AIOps tests**
 

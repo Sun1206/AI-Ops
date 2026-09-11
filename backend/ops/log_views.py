@@ -17,7 +17,7 @@ from rest_framework.response import Response
 from eventwall.mixins import EventWallModelViewSetMixin
 from eventwall.models import EventRecord
 from eventwall.services import record_event
-from .models import LogDataSource
+from .models import LogDataSource, LogEntry
 from .serializers import LogDataSourceSerializer
 from rbac.permissions import RBACPermissionMixin, build_rbac_permission
 
@@ -1137,6 +1137,55 @@ def _query_loki(config, payload):
     start_ms, end_ms = _time_bounds(payload)
 
     if _is_demo_config(config):
+        start_at = datetime.fromtimestamp(start_ms / 1000, tz=dt_timezone.utc)
+        end_at = datetime.fromtimestamp(end_ms / 1000, tz=dt_timezone.utc)
+        stored_logs = LogEntry.objects.select_related('host').filter(
+            timestamp__gte=start_at,
+            timestamp__lte=end_at,
+        ).order_by('-timestamp')
+        matched_logs = []
+        for log in stored_logs:
+            host = log.host
+            stream = {
+                'job': log.service,
+                'app': log.service,
+                'service': log.service,
+                'service_name': log.service,
+                'level': log.level,
+                'host': host.hostname if host else '',
+                'env': host.environment if host else 'prod',
+            }
+            entry = {
+                'stream': stream,
+                'message': log.message,
+                'attributes': {
+                    'host': stream['host'],
+                    'environment': stream['env'],
+                },
+            }
+            if not _matches_demo_loki_query(entry, query):
+                continue
+            attributes = _with_trace_id(
+                {**entry['stream'], **entry['attributes']},
+                entry['message'],
+            )
+            matched_logs.append({
+                'timestamp': log.timestamp.astimezone(dt_timezone.utc).isoformat().replace('+00:00', 'Z'),
+                'message': log.message,
+                'level': log.level,
+                'source': log.service,
+                'attributes': attributes,
+            })
+        if matched_logs:
+            return {
+                'provider': 'loki',
+                'query': query,
+                'source': '平台日志存储',
+                'total': len(matched_logs),
+                'took_ms': 8,
+                'logs': matched_logs[:_sanitize_limit(payload.get('limit'))],
+            }
+
         matched_logs = []
         for entry in _demo_loki_entries(start_ms, end_ms):
             if not _matches_demo_loki_query(entry, query):

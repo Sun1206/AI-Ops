@@ -500,7 +500,7 @@ def _grafana_meta():
         'url': base_url,
         'embed_url': _join_external_url(base_url, default_path) if base_url and default_path else (dashboards[0]['url'] if dashboards else base_url),
         'dashboard_count': len(dashboards),
-        'panel_count': sum(item['panel_count'] for item in dashboards),
+        'panel_count': sum(item.get('panel_count') or 0 for item in dashboards),
         'datasource_count': 4,
         'folders': configured_folders,
         'dashboards': dashboards,

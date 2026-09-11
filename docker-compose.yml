@@ -1,10 +1,10 @@
 services:
-  sxdevops:
+  aidevops:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sxdevops:latest
-    container_name: sxdevops-app
+    image: aidevops:latest
+    container_name: aidevops-app
     restart: unless-stopped
     depends_on:
       mysql:
@@ -15,9 +15,9 @@ services:
       DATABASE_ENGINE: mysql
       MYSQL_HOST: mysql
       MYSQL_PORT: "3306"
-      MYSQL_DATABASE: sxdevops
-      MYSQL_USER: sxdevops
-      MYSQL_PASSWORD: sxdevops_password
+      MYSQL_DATABASE: aidevops
+      MYSQL_USER: aidevops
+      MYSQL_PASSWORD: aidevops
       REDIS_URL: redis://redis:6379/0
       CHANNEL_REDIS_URL: redis://redis:6379/1
       SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY to a unique random value before starting Compose}
@@ -33,17 +33,19 @@ services:
 
   mysql:
     image: mysql:8.0
-    container_name: sxdevops-mysql
+    container_name: aidevops-mysql
+    ports:
+      - "127.0.0.1:3307:3306"
     restart: unless-stopped
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --default-authentication-plugin=mysql_native_password
     environment:
-      MYSQL_DATABASE: sxdevops
-      MYSQL_USER: sxdevops
-      MYSQL_PASSWORD: sxdevops_password
-      MYSQL_ROOT_PASSWORD: sxdevops_root_password
+      MYSQL_DATABASE: aidevops
+      MYSQL_USER: aidevops
+      MYSQL_PASSWORD: aidevops
+      MYSQL_ROOT_PASSWORD: aidevops
       TZ: Asia/Shanghai
     volumes:
       - mysql_data:/var/lib/mysql
@@ -55,7 +57,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: sxdevops-redis
+    container_name: aidevops-redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:

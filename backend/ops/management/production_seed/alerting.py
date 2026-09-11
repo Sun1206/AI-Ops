@@ -53,6 +53,119 @@ RULES = [
 
 HISTORY_DAYS = [1, 2, 3, 4, 5, 6, 7, 9, 12, 15, 18, 21, 25, 30, 36, 45, 55, 65, 75, 88]
 
+ALERT_PROVIDERS = [
+    ('Prometheus Alertmanager', 'prometheus'),
+    ('夜莺监控平台', 'nightingale'),
+    ('Zabbix 生产监控', 'zabbix'),
+    ('阿里云云监控', 'aliyun'),
+]
+
+ALERT_TEMPLATES = [
+    ('订单接口 P99 延迟超过阈值', 'order-service', '交易平台', 'application', 'http_request_duration_p99', '订单请求 P99 延迟持续高于 800ms'),
+    ('支付异步任务积压', 'payment-worker', '支付平台', 'queue', 'payment_queue_depth', '支付回调队列积压超过容量水位'),
+    ('会员服务错误率升高', 'member-api', '会员中心', 'application', 'http_error_rate', '会员权益查询错误率持续升高'),
+    ('数据库连接池使用率过高', 'mysql-primary', '交易平台', 'database', 'db_pool_usage', '主库连接池使用率超过 90%'),
+    ('Kubernetes 节点磁盘压力', 'kubelet', '基础设施', 'node', 'node_disk_pressure', '生产集群节点出现磁盘压力'),
+    ('网关上游 5xx 增加', 'gateway-nginx', '接入网关', 'gateway', 'upstream_5xx_rate', '网关上游服务 5xx 比例超过阈值'),
+    ('Redis 热点 Key 流量突增', 'redis-cluster', '基础设施', 'cache', 'redis_hotkey_qps', '热点 Key 请求量超过正常基线'),
+    ('数据同步链路延迟', 'data-sync', '数据平台', 'job', 'sync_lag_seconds', '实时数据同步延迟超过五分钟'),
+]
+
+
+def _seed_alert_events(stats, base, now):
+    alerts = []
+    for index in range(260):
+        title, service, business_line, resource_type, metric_name, message = (
+            ALERT_TEMPLATES[index % len(ALERT_TEMPLATES)]
+        )
+        source, source_type = ALERT_PROVIDERS[index % len(ALERT_PROVIDERS)]
+        status_value = (
+            'active'
+            if index % 5 in {0, 1}
+            else 'resolved'
+            if index % 5 in {2, 3}
+            else 'closed'
+        )
+        level = 'critical' if index % 7 == 0 else ('info' if index % 11 == 0 else 'warning')
+        event_time = now - timedelta(
+            days=index % 30,
+            hours=(index * 5) % 24,
+            minutes=(index * 17) % 60,
+            seconds=index % 53,
+        )
+        last_received_at = event_time + timedelta(minutes=index % 23)
+        alert = get_or_create_json_key(
+            Alert,
+            json_field='raw_payload',
+            seed_key=f'production-alert-{index + 1:03d}',
+            defaults={
+                'title': title,
+                'level': level,
+                'status': status_value,
+                'source': source,
+                'source_type': source_type,
+                'external_id': f'OPS-{source_type.upper()}-{index + 1:06d}',
+                'fingerprint': f'{source_type}:{service}:{metric_name}:{index + 1:03d}',
+                'group_key': f'prod/{business_line}/{service}',
+                'message': message,
+                'is_acknowledged': status_value != 'active' and index % 3 != 0,
+                'acknowledged_by': (
+                    RECIPIENTS[index % len(RECIPIENTS)][0]
+                    if status_value != 'active' and index % 3 != 0
+                    else ''
+                ),
+                'acknowledged_at': (
+                    event_time + timedelta(minutes=8 + index % 20)
+                    if status_value != 'active' and index % 3 != 0
+                    else None
+                ),
+                'host': base['host'],
+                'service': service,
+                'environment': 'prod' if index % 8 else 'staging',
+                'cluster': 'prod-shanghai-k8s',
+                'namespace': 'production',
+                'region': 'cn-shanghai',
+                'business_line': business_line,
+                'resource_type': resource_type,
+                'resource': f'{service}-{index % 12 + 1:02d}',
+                'metric_name': metric_name,
+                'labels': {
+                    'service': service,
+                    'environment': 'prod',
+                    'severity': level,
+                },
+                'annotations': {
+                    'summary': title,
+                    'description': message,
+                },
+                'raw_payload': {
+                    'seed_namespace': 'production-alerts',
+                    'receiver': 'platform-alert-center',
+                },
+                'starts_at': event_time,
+                'ends_at': (
+                    event_time + timedelta(minutes=18 + index % 90)
+                    if status_value != 'active'
+                    else None
+                ),
+                'last_received_at': last_received_at,
+                'occurrence_count': 1 + index % 19,
+                'closed_at': (
+                    event_time + timedelta(minutes=30 + index % 100)
+                    if status_value == 'closed'
+                    else None
+                ),
+            },
+            stats=stats,
+        )
+        backdate(
+            alert,
+            created_at=event_time,
+            updated_at=last_received_at,
+        )
+        alerts.append(alert)
+    return alerts
+
 
 def seed_alerting(stats, base):
     recipients = []
@@ -156,7 +269,7 @@ def seed_alerting(stats, base):
             stats,
         )
 
-    alerts = [base['alert']]
+    alerts = _seed_alert_events(stats, base, now)
     notification_statuses = ['success', 'success', 'skipped', 'error']
     for index in range(20):
         status = notification_statuses[index % len(notification_statuses)]
@@ -207,4 +320,5 @@ def seed_alerting(stats, base):
         'groups': groups,
         'channels': channels,
         'rules': rules,
+        'alerts': alerts,
     }
