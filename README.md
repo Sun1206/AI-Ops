@@ -114,26 +114,6 @@ flowchart TB
 - 前端展示权限只是体验优化，后端 RBAC 才是安全边界。
 - 会话、工具调用、Action 预检、待确认动作、执行结果和关键事件都要留痕。
 
-## 产品截图
-
-### AI Agent
-
-![AI Agent](docs/screenshots/智能助手.png)
-![知识图谱](docs/screenshots/知识图谱.png)
-
-### 日志/链路排障取证
-
-![日志/链路排障取证](docs/screenshots/链路追踪.png)
-
-### 事件中心
-
-![事件中心](docs/screenshots/事件中心.png)
-
-### 任务资源与执行入口
-
-![任务资源与执行入口](docs/screenshots/任务中心.png)
-
-更多截图保存在 [docs/screenshots](docs/screenshots)。
 
 ## 技术栈
 
